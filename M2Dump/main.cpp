@@ -1,11 +1,19 @@
 // M2 file dumper. Only currently supports cameras. Deal with it
 // Also it doesn't bounds check the buffer. So corrupt files will cause a crash. Guess what? Deal with it!
-#define _USE_MATH_DEFINES = true;
+#define _USE_MATH_DEFINES = true
 #include <math.h>
 #include <vector>
 #include <fstream>
 #include <iostream>
 #include <iomanip>
+
+#define VERSION_CLASSIC 1
+#define VERSION_TBC 260
+#define VERSION_WOTLK 264
+#define VERSION_CATA 265
+#define VERSION_MISTS 272
+#define VERSION_WOD 273
+#define VERSION_LEGION 274
 
 using namespace std;
 typedef uint64_t uint64;
@@ -131,9 +139,25 @@ struct M2Camera
     M2Track target_positions; // How the target moves. Should be 3*3 floats.
     C3Vector target_position_base;
     M2Track rolldata; // The camera can have some roll-effect. Its 0 to 2*Pi. 
+    M2Track fovdata;  // Left for dummy use
 };
 
-void dumpCameras(M2Camera const* cam, uint32 numCams, char const* buffer);
+struct M2CameraCata
+{
+    uint32_t type; // 0: portrait, 1: characterinfo; -1: else (flyby etc.); referenced backwards in the lookup table.
+    float far_clip;
+    float near_clip;
+    M2Track positions; // How the camera's position moves. Should be 3*3 floats.
+    C3Vector position_base;
+    M2Track target_positions; // How the target moves. Should be 3*3 floats.
+    C3Vector target_position_base;
+    M2Track rolldata; // The camera can have some roll-effect. Its 0 to 2*Pi. 
+    M2Track fovdata;  // Cata+ field of view by timeframe (so we can zooooom in the cinematic)
+    float fov;        // Left here for dummy use
+};
+
+template <typename T>
+void dumpCameras(T const* cam, uint32 numCams, M2Header const* header);
 
 int main(int argc, char* argv[])
 {
@@ -198,20 +222,28 @@ int main(int argc, char* argv[])
 
     // Get camera(s) - Main header, then dump them.
     M2Camera const* cam = (M2Camera const*)(buffer.data() + header->ofsCameras);
-    dumpCameras(cam, header->nCameras, buffer.data());
+    M2CameraCata const* camCata = (M2CameraCata const*)(buffer.data() + header->ofsCameras);
+    if (header->Version >= VERSION_CATA)
+        dumpCameras(camCata, header->nCameras, header);
+    else
+        dumpCameras(cam, header->nCameras, header);
 
     return 0;
 }
 
-void dumpCameras(M2Camera const* cam, uint32 numCams, char const* buffer)
+template <typename T>
+void dumpCameras(T const* cam, uint32 numCams, M2Header const* header)
 {
+    char const* buffer = (char const*)header;
     cout << std::fixed << std::setprecision(6);
     cout << "Found " << numCams << " camera(s)\n";
     for (uint32 j = 0; j < numCams; ++j)
     {
         // Output header info for this camera (usually just one camera, but still)
-        cout << "  Handling camera " << j + 1 << " of " << cam->positions.timestamps.number << "\n";
-        cout << "  Camera FOV " << cam->fov << " interpolation type " << cam->positions.interpolation_type << "\n";
+        cout << "  Handling camera " << j + 1 << " of " << numCams << "\n";
+        if (header->Version < VERSION_CATA)
+            cout << "  Camera FOV " << cam->fov << "\n";
+        cout << " interpolation type " << cam->positions.interpolation_type << "\n";
         cout << "  Camera Near clip " << cam->near_clip << " far clip " << cam->far_clip << "\n";
         cout << "  Start position       [" << std::setw(12) << cam->position_base.x << ", " << std::setw(12) << cam->position_base.y << ", " << std::setw(12) << cam->position_base.z << "]\n";
         cout << "  End position         [" << std::setw(12) << cam->target_position_base.x << ", " << std::setw(12) << cam->target_position_base.y << ", " << std::setw(12) << cam->target_position_base.z << "]\n\n";
@@ -291,7 +323,34 @@ void dumpCameras(M2Camera const* cam, uint32 numCams, char const* buffer)
             rollTsArray++;
         }
 
+        // Optionally show field of view changes
+        if (header->Version >= VERSION_CATA)
+        {
+            // Dump fov data and timestamps
+            cout << "  FoV Data:\n";
+            for (uint32 k = 0; k < cam->fovdata.timestamps.number; ++k)
+            {
+                // Usually only 1, but we should support more (maybe cata uses?)
+                cout << "    FoV Set 1 of " << cam->fovdata.timestamps.number << "\n";
+
+                // Extract roll positions
+                M2Array const* fovTsArray = (M2Array const*)(buffer + cam->fovdata.timestamps.offset_elements);
+                uint32 const* fovTimestamps = (uint32 const*)(buffer + fovTsArray->offset_elements);
+                M2Array const* fovArray = (M2Array const*)(buffer + cam->fovdata.values.offset_elements);
+                M2SplineKey<float> const* fovPositions = (M2SplineKey<float> const*)(buffer + fovArray->offset_elements);
+
+                // Dump the data for this set
+                for (uint32 i = 0; i < fovTsArray->number; ++i)
+                {
+                    cout << "      Timestamp " << i << ": " << fovTimestamps[i] << "\n";
+                    cout << "        FoV Data 1 : " << std::setw(12) << fovPositions->p0 << " (" << std::fmod(fovPositions->p0 * 35, 360.0f) << " degrees) \n";
+                    cout << "        FoV Data 2 : " << std::setw(12) << fovPositions->p1 << " (" << std::fmod(fovPositions->p1 * 35, 360.0f) << " degrees) \n";
+                    cout << "        FoV Data 3 : " << std::setw(12) << fovPositions->p2 << " (" << std::fmod(fovPositions->p2 * 35, 360.0f) << " degrees) \n";
+                    fovPositions++;
+                }
+                fovTsArray++;
+            }
+        }
         cam++;
     }
-
 }
